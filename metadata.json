@@ -1,0 +1,6 @@
+{
+  "name": "GPREC Academic Hub",
+  "description": "Centralized academic resource library for G Pulla Reddy Engineering College students and faculty with organizational authentication, unit-wise notes, and lab code viewer.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
