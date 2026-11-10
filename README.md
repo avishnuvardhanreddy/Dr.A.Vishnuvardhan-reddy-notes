@@ -16,7 +16,7 @@ This contains everything you need to run your app locally.
 
 ## Deploying to Vercel
 
-The API is exposed through the Vercel function in `api/[...path].ts`. Set `DATABASE_URL` to your Neon connection string in the Vercel project's environment variables. The app creates its state table automatically and stores accounts, sessions, academic content, and audit logs in Neon. Also configure `ADMIN_EMAIL` and `ADMIN_PASSWORD` before using administrator login. Configure `STUDENT_SHARED_USER_ID` and `STUDENT_SHARED_PASSWORD` if shared student login is needed.
+The API is exposed through the Vercel function in `api/index.ts`, with `/api/*` requests routed to the existing Express routes by `vercel.json`. Set `DATABASE_URL` to your Neon connection string in the Vercel project's environment variables. The app creates its state table automatically and stores accounts, sessions, academic content, and audit logs in Neon. Also configure `ADMIN_EMAIL` and `ADMIN_PASSWORD` before using administrator login. Configure `STUDENT_SHARED_USER_ID` and `STUDENT_SHARED_PASSWORD` if shared student login is needed.
 
 Uploaded file contents still use Vercel's temporary filesystem and can be lost when an instance restarts. Use persistent object storage for uploaded files before relying on those uploads in production.
 
