@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import crypto from 'crypto';
 import {
   AcademicYear,
@@ -13,7 +14,9 @@ import {
   AdminStats
 } from '../src/lib/types.js';
 
-const DATA_DIR = path.resolve(process.cwd(), 'data');
+const DATA_DIR = process.env.VERCEL === '1'
+  ? path.join(os.tmpdir(), 'gprec-academic-hub')
+  : path.resolve(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'gprec_db.json');
 export const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 
