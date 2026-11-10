@@ -169,6 +169,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     loadAdminData();
   }, []);
 
+  useEffect(() => {
+    if (subjects.length === 0) {
+      setSelectedSubjectForUnits('');
+      setCurrentSubjectUnits([]);
+      return;
+    }
+
+    if (!subjects.some(subject => subject.id === selectedSubjectForUnits)) {
+      setSelectedSubjectForUnits(subjects[0].id);
+    }
+  }, [subjects, selectedSubjectForUnits]);
+
   // Fetch Units when Subject for Unit management changes
   useEffect(() => {
     if (!selectedSubjectForUnits) return;
@@ -977,6 +989,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <select
                 value={selectedSubjectForUnits}
                 onChange={(e) => setSelectedSubjectForUnits(e.target.value)}
+                disabled={subjects.length === 0}
                 className="px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-bold text-slate-900 dark:text-white"
               >
                 {subjects.map(s => (
@@ -997,6 +1010,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <h3 className="font-bold text-base text-slate-900 dark:text-white mb-4">
               {unitFormData.id ? 'Edit Unit' : 'Create New Unit for Selected Subject'}
             </h3>
+
+            {subjects.length === 0 && (
+              <div className="mb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 p-4 text-sm text-amber-800 dark:text-amber-200">
+                <p>Create a subject in Subjects &amp; Semesters before adding units.</p>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('structure')}
+                  className="self-start sm:self-auto rounded-lg bg-amber-600 px-3 py-2 text-xs font-semibold text-white hover:bg-amber-700"
+                >
+                  Go to Subjects &amp; Semesters
+                </button>
+              </div>
+            )}
 
             <form onSubmit={handleSaveUnit} className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -1071,6 +1097,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   )}
                   <button
                     type="submit"
+                    disabled={subjects.length === 0 || !selectedSubjectForUnits}
                     className="px-4 py-2 rounded-xl text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white"
                   >
                     {unitFormData.id ? 'Update Unit' : 'Add Unit'}
