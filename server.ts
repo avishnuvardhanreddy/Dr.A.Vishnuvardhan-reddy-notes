@@ -5,6 +5,7 @@ import multer from 'multer';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { db, UPLOAD_DIR } from './server/db.js';
+import { deleteStoredFile, sendStoredFile, storeUploadedFile, storedFileExists } from './server/storage.js';
 import { validateGprecEmail } from './src/lib/auth-validation.js';
 import { filterAndSearchResources } from './src/lib/search-indexer.js';
 import { detectLanguageFromFilename } from './src/lib/code-highlighter-utils.js';
@@ -88,6 +89,26 @@ const upload = multer({
   storage,
   limits: { fileSize: 50 * 1024 * 1024 }
 });
+
+async function storeUploadedFiles(files: Express.Multer.File[]): Promise<{ file: Express.Multer.File; storagePath: string }[]> {
+  const storedFiles: { file: Express.Multer.File; storagePath: string }[] = [];
+  try {
+    for (const file of files) {
+      storedFiles.push({ file, storagePath: await storeUploadedFile(file) });
+    }
+    return storedFiles;
+  } catch (error) {
+    await Promise.all(files.map(file => fs.promises.rm(file.path, { force: true })));
+    await Promise.all(storedFiles.map(async ({ storagePath }) => {
+      try {
+        await deleteStoredFile(storagePath);
+      } catch (cleanupError) {
+        console.error('Failed to clean up an incomplete file upload:', cleanupError);
+      }
+    }));
+    throw error;
+  }
+}
 
 // Auth Middleware helpers
 interface AuthenticatedRequest extends Request {
@@ -485,7 +506,7 @@ app.delete('/api/resources/:id', requireAdmin, (req: AuthenticatedRequest, res) 
 });
 
 // Attach File to Existing Resource (Admin)
-app.post('/api/resources/:id/files', requireAdmin, upload.array('files', 10), (req: AuthenticatedRequest, res) => {
+app.post('/api/resources/:id/files', requireAdmin, upload.array('files', 10), async (req: AuthenticatedRequest, res, next) => {
   const { id } = req.params;
   const resource = db.getResources().find(r => r.id === id);
   if (!resource) {
@@ -499,26 +520,31 @@ app.post('/api/resources/:id/files', requireAdmin, upload.array('files', 10), (r
     return;
   }
 
-  const addedFiles = files.map(file => {
-    const resourceFile = {
-      id: 'file-' + crypto.randomUUID(),
-      resourceId: id,
-      originalName: file.originalname,
-      fileName: file.filename,
-      mimeType: file.mimetype || 'application/octet-stream',
-      sizeBytes: file.size,
-      storagePath: file.path,
-      uploaderEmail: req.user!.email,
-      createdAt: new Date().toISOString()
-    };
-    return db.addResourceFile(resourceFile, req.user!.email);
-  });
+  try {
+    const storedFiles = await storeUploadedFiles(files);
+    const addedFiles = storedFiles.map(({ file, storagePath }) => {
+      const resourceFile = {
+        id: 'file-' + crypto.randomUUID(),
+        resourceId: id,
+        originalName: file.originalname,
+        fileName: file.filename,
+        mimeType: file.mimetype || 'application/octet-stream',
+        sizeBytes: file.size,
+        storagePath,
+        uploaderEmail: req.user!.email,
+        createdAt: new Date().toISOString()
+      };
+      return db.addResourceFile(resourceFile, req.user!.email);
+    });
 
-  res.json({ success: true, files: addedFiles });
+    res.json({ success: true, files: addedFiles });
+  } catch (error) {
+    next(error);
+  }
 });
 
 // Quick Upload: Upload File and Create Resource automatically (Admin)
-app.post('/api/resources/quick-upload', requireAdmin, upload.array('files', 10), (req: AuthenticatedRequest, res) => {
+app.post('/api/resources/quick-upload', requireAdmin, upload.array('files', 10), async (req: AuthenticatedRequest, res, next) => {
   const { unitId, title, description, type } = req.body;
   if (!unitId || !title) {
     res.status(400).json({ error: 'Unit ID and title are required.' });
@@ -546,90 +572,111 @@ app.post('/api/resources/quick-upload', requireAdmin, upload.array('files', 10),
     }
   }
 
-  const resource = db.addResource({
-    id: resId,
-    unitId,
-    title: title.trim(),
-    description: description?.trim() || '',
-    type: type || (codeLanguage ? 'code' : 'file'),
-    content,
-    codeLanguage,
-    isPublished: true,
-    authorEmail: req.user!.email,
-    files: [],
-    createdAt: now,
-    updatedAt: now
-  }, req.user!.email);
+  try {
+    const storedFiles = await storeUploadedFiles(files);
+    const resource = db.addResource({
+      id: resId,
+      unitId,
+      title: title.trim(),
+      description: description?.trim() || '',
+      type: type || (codeLanguage ? 'code' : 'file'),
+      content,
+      codeLanguage,
+      isPublished: true,
+      authorEmail: req.user!.email,
+      files: [],
+      createdAt: now,
+      updatedAt: now
+    }, req.user!.email);
+    const attached = storedFiles.map(({ file, storagePath }) => {
+      const rf = {
+        id: 'file-' + crypto.randomUUID(),
+        resourceId: resId,
+        originalName: file.originalname,
+        fileName: file.filename,
+        mimeType: file.mimetype || 'application/octet-stream',
+        sizeBytes: file.size,
+        storagePath,
+        uploaderEmail: req.user!.email,
+        createdAt: now
+      };
+      return db.addResourceFile(rf, req.user!.email);
+    });
 
-  const attached = files.map(file => {
-    const rf = {
-      id: 'file-' + crypto.randomUUID(),
-      resourceId: resId,
-      originalName: file.originalname,
-      fileName: file.filename,
-      mimeType: file.mimetype || 'application/octet-stream',
-      sizeBytes: file.size,
-      storagePath: file.path,
-      uploaderEmail: req.user!.email,
-      createdAt: now
-    };
-    return db.addResourceFile(rf, req.user!.email);
-  });
-
-  res.status(201).json({ ...resource, files: attached });
+    res.status(201).json({ ...resource, files: attached });
+  } catch (error) {
+    next(error);
+  }
 });
 
 // Safe File Download Endpoint
-app.get('/api/files/download/:id', authMiddleware, (req, res) => {
+app.get('/api/files/download/:id', authMiddleware, async (req, res, next) => {
   const { id } = req.params;
   const fileRecord = db.getResourceFiles().find(f => f.id === id);
-  if (!fileRecord || !fs.existsSync(fileRecord.storagePath)) {
+  if (!fileRecord) {
     res.status(404).json({ error: 'File not found or removed from storage' });
     return;
   }
 
-  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileRecord.originalName)}"`);
-  res.setHeader('Content-Type', 'application/octet-stream');
-  res.sendFile(path.resolve(fileRecord.storagePath));
+  try {
+    if (!await storedFileExists(fileRecord.storagePath)) {
+      res.status(404).json({ error: 'File not found or removed from storage' });
+      return;
+    }
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileRecord.originalName)}"`);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    await sendStoredFile(fileRecord.storagePath, res);
+  } catch (error) {
+    next(error);
+  }
 });
 
 // Safe Preview Endpoint
-app.get('/api/files/preview/:id', authMiddleware, (req, res) => {
+app.get('/api/files/preview/:id', authMiddleware, async (req, res, next) => {
   const { id } = req.params;
   const fileRecord = db.getResourceFiles().find(f => f.id === id);
-  if (!fileRecord || !fs.existsSync(fileRecord.storagePath)) {
+  if (!fileRecord) {
     res.status(404).json({ error: 'File not found' });
     return;
   }
 
-  const ext = path.extname(fileRecord.originalName).toLowerCase();
+  try {
+    if (!await storedFileExists(fileRecord.storagePath)) {
+      res.status(404).json({ error: 'File not found' });
+      return;
+    }
 
-  // Treat potentially dangerous active formats (like SVG, HTML) as downloads or plaintext
-  if (['.html', '.htm', '.svg'].includes(ext)) {
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    res.setHeader('Content-Disposition', 'inline');
-    res.sendFile(path.resolve(fileRecord.storagePath));
-    return;
+    const ext = path.extname(fileRecord.originalName).toLowerCase();
+
+    // Treat potentially dangerous active formats (like SVG, HTML) as downloads or plaintext
+    if (['.html', '.htm', '.svg'].includes(ext)) {
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline');
+      await sendStoredFile(fileRecord.storagePath, res);
+      return;
+    }
+
+    // Safe images and PDFs
+    if (['.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(ext)) {
+      res.setHeader('Content-Disposition', 'inline');
+      await sendStoredFile(fileRecord.storagePath, res);
+      return;
+    }
+
+    // Safe text and source code preview
+    if (['.txt', '.java', '.py', '.c', '.cpp', '.js', '.ts', '.sql', '.json', '.xml', '.sh', '.md'].includes(ext)) {
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline');
+      await sendStoredFile(fileRecord.storagePath, res);
+      return;
+    }
+
+    // Unsupported preview format -> Fallback to attachment download
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileRecord.originalName)}"`);
+    await sendStoredFile(fileRecord.storagePath, res);
+  } catch (error) {
+    next(error);
   }
-
-  // Safe images and PDFs
-  if (['.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(ext)) {
-    res.setHeader('Content-Disposition', 'inline');
-    res.sendFile(path.resolve(fileRecord.storagePath));
-    return;
-  }
-
-  // Safe text and source code preview
-  if (['.txt', '.java', '.py', '.c', '.cpp', '.js', '.ts', '.sql', '.json', '.xml', '.sh', '.md'].includes(ext)) {
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    res.setHeader('Content-Disposition', 'inline');
-    res.sendFile(path.resolve(fileRecord.storagePath));
-    return;
-  }
-
-  // Unsupported preview format -> Fallback to attachment download
-  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileRecord.originalName)}"`);
-  res.sendFile(path.resolve(fileRecord.storagePath));
 });
 
 // ==========================================
