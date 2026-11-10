@@ -1,12 +1,6 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
-
-# Run and deploy your AI Studio app
+# Run and deploy the app
 
 This contains everything you need to run your app locally.
-
-View your app in AI Studio: https://ai.studio/apps/733a5121-ad67-45f8-9ba0-4c9eeccb925a
 
 ## Run Locally
 
@@ -23,3 +17,4 @@ View your app in AI Studio: https://ai.studio/apps/733a5121-ad67-45f8-9ba0-4c9ee
 This portal is for Dr. A. Vishnu Vardhan Reddy, Associate Professor, CSM, to share notes with his students. All students use the same account, so actions cannot be attributed to individual users. The shared password is stored as a salted hash and can be changed from **Portal Accounts**. Admin access is restricted to the configured faculty owner.
 "# Dr.A.Vishnuvardhan-reddy-notes" 
 "# Dr.A.Vishnuvardhan-reddy-notes" 
+"# Dr.A.Vishnu-sNotes" 
