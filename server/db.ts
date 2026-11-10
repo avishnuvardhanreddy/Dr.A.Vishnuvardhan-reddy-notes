@@ -2,6 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { Pool } from '@neondatabase/serverless';
 import {
   AcademicYear,
   Semester,
@@ -40,6 +42,16 @@ export interface DatabaseSchema {
   resources: Resource[];
   resourceFiles: ResourceFile[];
   auditLogs: AuditLog[];
+}
+
+export interface DatabaseRequestState {
+  data: DatabaseSchema;
+}
+
+export interface DatabaseTransaction {
+  state: DatabaseRequestState;
+  commit: () => Promise<void>;
+  rollback: () => Promise<void>;
 }
 
 function getInitialSeed(): DatabaseSchema {
@@ -106,11 +118,145 @@ function getInitialSeed(): DatabaseSchema {
   };
 }
 
+function isDatabaseSchema(value: unknown): value is DatabaseSchema {
+  if (typeof value !== 'object' || value === null) return false;
+  const data = value as Record<string, unknown>;
+  return [
+    'users',
+    'sessions',
+    'otpRequests',
+    'years',
+    'semesters',
+    'subjects',
+    'units',
+    'resources',
+    'resourceFiles',
+    'auditLogs',
+  ].every(key => Array.isArray(data[key]));
+}
+
 class Database {
-  private data: DatabaseSchema;
+  private baseData: DatabaseSchema;
+  private requestState = new AsyncLocalStorage<DatabaseRequestState>();
+  private pool: Pool | null = null;
+  private schemaReady: Promise<void> | null = null;
+
+  private get data(): DatabaseSchema {
+    return this.requestState.getStore()?.data ?? this.baseData;
+  }
+
+  private set data(data: DatabaseSchema) {
+    const state = this.requestState.getStore();
+    if (state) {
+      state.data = data;
+    } else {
+      this.baseData = data;
+    }
+  }
 
   constructor() {
-    this.data = this.load();
+    this.baseData = this.load();
+  }
+
+  private getPool(): Pool | null {
+    const connectionString = process.env.DATABASE_URL?.trim();
+    if (!connectionString) return null;
+    if (!this.pool) {
+      this.pool = new Pool({ connectionString, max: 1 });
+    }
+    return this.pool;
+  }
+
+  public hasPersistentStore(): boolean {
+    return this.getPool() !== null;
+  }
+
+  private async ensurePersistentSchema(pool: Pool): Promise<void> {
+    if (!this.schemaReady) {
+      this.schemaReady = pool.query(`
+        CREATE TABLE IF NOT EXISTS gprec_academic_hub_state (
+          id SMALLINT PRIMARY KEY CHECK (id = 1),
+          data JSONB NOT NULL
+        )
+      `).then(() => undefined).catch((error: unknown) => {
+        this.schemaReady = null;
+        throw error;
+      });
+    }
+    await this.schemaReady;
+  }
+
+  public async beginRequest(): Promise<DatabaseTransaction | null> {
+    const pool = this.getPool();
+    if (!pool) return null;
+
+    await this.ensurePersistentSchema(pool);
+    const client = await pool.connect();
+    const state: DatabaseRequestState = { data: getInitialSeed() };
+
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO gprec_academic_hub_state (id, data)
+         VALUES (1, $1::jsonb)
+         ON CONFLICT (id) DO NOTHING`,
+        [JSON.stringify(state.data)]
+      );
+      const result = await client.query(
+        'SELECT data FROM gprec_academic_hub_state WHERE id = 1 FOR UPDATE'
+      );
+      const storedData: unknown = result.rows[0]?.data;
+      if (!isDatabaseSchema(storedData)) {
+        throw new Error('Neon database contains an invalid application state record.');
+      }
+      state.data = storedData;
+
+      let finished = false;
+      return {
+        state,
+        commit: async () => {
+          if (finished) return;
+          finished = true;
+          try {
+            await client.query(
+              'UPDATE gprec_academic_hub_state SET data = $1::jsonb WHERE id = 1',
+              [JSON.stringify(state.data)]
+            );
+            await client.query('COMMIT');
+          } catch (error) {
+            try {
+              await client.query('ROLLBACK');
+            } catch (rollbackError) {
+              console.error('Failed to roll back Neon database transaction:', rollbackError);
+            }
+            throw error;
+          } finally {
+            client.release();
+          }
+        },
+        rollback: async () => {
+          if (finished) return;
+          finished = true;
+          try {
+            await client.query('ROLLBACK');
+          } finally {
+            client.release();
+          }
+        },
+      };
+    } catch (error) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to roll back Neon database transaction:', rollbackError);
+      }
+      client.release();
+      throw error;
+    }
+  }
+
+  public runWithRequestState<T>(state: DatabaseRequestState, callback: () => T): T {
+    return this.requestState.run(state, callback);
   }
 
   private load(): DatabaseSchema {
@@ -165,6 +311,7 @@ class Database {
   }
 
   private saveDirect(data: DatabaseSchema): void {
+    if (this.requestState.getStore()) return;
     fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf-8');
   }
 

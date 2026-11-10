@@ -19,6 +19,57 @@ const isProd = process.env.NODE_ENV === 'production';
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
+app.use((req, res, next) => {
+  if (process.env.VERCEL === '1' && !db.hasPersistentStore()) {
+    res.status(503).json({ error: 'DATABASE_URL must be configured for this Vercel deployment.' });
+    return;
+  }
+
+  if (!db.hasPersistentStore()) {
+    next();
+    return;
+  }
+
+  void db.beginRequest().then(transaction => {
+    if (!transaction) {
+      next();
+      return;
+    }
+
+    let finished = false;
+    const sendJson = res.json.bind(res);
+    res.json = (body) => {
+      if (finished) return res;
+      finished = true;
+      void transaction.commit().then(() => {
+        sendJson(body);
+      }).catch((error: unknown) => {
+        console.error('Failed to persist Neon database transaction:', error);
+        if (res.headersSent) {
+          res.destroy(error instanceof Error ? error : new Error('Failed to persist database request.'));
+          return;
+        }
+        res.status(503);
+        sendJson({ error: 'The application database is temporarily unavailable.' });
+      });
+      return res;
+    };
+
+    res.once('close', () => {
+      if (finished) return;
+      finished = true;
+      void transaction.rollback().catch((error: unknown) => {
+        console.error('Failed to release Neon database transaction:', error);
+      });
+    });
+
+    db.runWithRequestState(transaction.state, next);
+  }).catch((error: unknown) => {
+    console.error('Failed to initialize Neon database request:', error);
+    res.status(503).json({ error: 'The application database is temporarily unavailable.' });
+  });
+});
+
 // Multer storage for ANY uploaded file format
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => {
