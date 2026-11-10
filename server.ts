@@ -716,10 +716,7 @@ app.get('/api/admin/users', requireAdmin, (_req, res) => {
 });
 
 app.get('/api/admin/student-login', requireAdmin, (_req, res) => {
-  if (!initializeSharedStudentCredentials()) {
-    res.status(503).json({ error: 'Shared student login has not been configured.' });
-    return;
-  }
+  initializeSharedStudentCredentials();
   res.json({ userId: db.getSharedStudentUserId() });
 });
 
