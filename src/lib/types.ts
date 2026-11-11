@@ -83,11 +83,20 @@ export interface Resource {
   updatedAt: string;
 }
 
+export interface FacultyNotification {
+  id: string;
+  title: string;
+  message: string;
+  authorEmail: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AuditLog {
   id: string;
   userEmail: string;
   action: string;
-  entityType: 'subject' | 'unit' | 'resource' | 'user' | 'file';
+  entityType: 'subject' | 'unit' | 'resource' | 'notification' | 'user' | 'file';
   entityId: string;
   details: string;
   timestamp: string;

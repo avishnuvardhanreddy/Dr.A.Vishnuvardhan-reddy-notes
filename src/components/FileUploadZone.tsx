@@ -73,7 +73,7 @@ export const FileUploadZone: React.FC<FileUploadZoneProps> = ({
               Click to select or drag and drop any academic file here
             </p>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-              Supports <strong>ANY file extension</strong> (PDF, Word, PPTX, Java, Python, C/C++, SQL, Jupyter .ipynb, ZIP, CSV, images, and arbitrary formats up to 50MB)
+              Supports <strong>ANY file extension</strong> (PDF, Word, PPTX, Java, Python, C/C++, SQL, Jupyter .ipynb, ZIP, CSV, images, and arbitrary formats), up to 50 MB per file and 10 files per upload.
             </p>
           </div>
         </div>

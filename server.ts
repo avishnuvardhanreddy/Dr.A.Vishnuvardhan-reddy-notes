@@ -5,7 +5,17 @@ import multer from 'multer';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { db, UPLOAD_DIR } from './server/db.js';
-import { deleteStoredFile, sendStoredFile, storeUploadedFile, storedFileExists } from './server/storage.js';
+import {
+  createPresignedUpload,
+  deletePresignedUpload,
+  deleteStoredFile,
+  inspectPresignedUpload,
+  readPresignedUploadText,
+  sendStoredFile,
+  storeUploadedFile,
+  storedFileExists,
+  usesDirectUploads,
+} from './server/storage.js';
 import { validateGprecEmail } from './src/lib/auth-validation.js';
 import { filterAndSearchResources } from './src/lib/search-indexer.js';
 import { detectLanguageFromFilename } from './src/lib/code-highlighter-utils.js';
@@ -20,7 +30,7 @@ const isProd = process.env.NODE_ENV === 'production';
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
-app.use((req, res, next) => {
+app.use('/api', (req, res, next) => {
   if (process.env.VERCEL === '1' && !db.hasPersistentStore()) {
     res.status(503).json({ error: 'DATABASE_URL must be configured for this Vercel deployment.' });
     return;
@@ -38,6 +48,13 @@ app.use((req, res, next) => {
     }
 
     let finished = false;
+    const releaseReadOnlyRequest = () => {
+      if (finished) return;
+      finished = true;
+      void transaction.rollback().catch((error: unknown) => {
+        console.error('Failed to release Neon database transaction:', error);
+      });
+    };
     const sendJson = res.json.bind(res);
     res.json = (body) => {
       if (finished) return res;
@@ -56,13 +73,8 @@ app.use((req, res, next) => {
       return res;
     };
 
-    res.once('close', () => {
-      if (finished) return;
-      finished = true;
-      void transaction.rollback().catch((error: unknown) => {
-        console.error('Failed to release Neon database transaction:', error);
-      });
-    });
+    res.once('finish', releaseReadOnlyRequest);
+    res.once('close', releaseReadOnlyRequest);
 
     db.runWithRequestState(transaction.state, next);
   }).catch((error: unknown) => {
@@ -89,6 +101,9 @@ const upload = multer({
   storage,
   limits: { fileSize: 50 * 1024 * 1024 }
 });
+const MAX_UPLOAD_FILES = 10;
+const MAX_UPLOAD_SIZE = 50 * 1024 * 1024;
+const UPLOAD_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 async function storeUploadedFiles(files: Express.Multer.File[]): Promise<{ file: Express.Multer.File; storagePath: string }[]> {
   const storedFiles: { file: Express.Multer.File; storagePath: string }[] = [];
@@ -435,6 +450,59 @@ app.delete('/api/academic/units/:id', requireAdmin, (req: AuthenticatedRequest, 
 // Resources & Notes Routes
 // ==========================================
 
+app.get('/api/notifications', authMiddleware, (_req, res) => {
+  res.json(db.getNotifications());
+});
+
+app.post('/api/notifications', requireAdmin, (req: AuthenticatedRequest, res) => {
+  const { title, message } = req.body;
+  if (typeof title !== 'string' || !title.trim() || title.trim().length > 160) {
+    res.status(400).json({ error: 'Notification title is required and must be 160 characters or fewer.' });
+    return;
+  }
+  if (typeof message !== 'string' || !message.trim() || message.trim().length > 5000) {
+    res.status(400).json({ error: 'Notification message is required and must be 5,000 characters or fewer.' });
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const notification = db.addNotification({
+    id: 'notification-' + crypto.randomUUID(),
+    title: title.trim(),
+    message: message.trim(),
+    authorEmail: req.user!.email,
+    createdAt: now,
+    updatedAt: now
+  }, req.user!.email);
+  res.status(201).json(notification);
+});
+
+app.put('/api/notifications/:id', requireAdmin, (req: AuthenticatedRequest, res) => {
+  const { title, message } = req.body;
+  if (typeof title !== 'string' || !title.trim() || title.trim().length > 160) {
+    res.status(400).json({ error: 'Notification title is required and must be 160 characters or fewer.' });
+    return;
+  }
+  if (typeof message !== 'string' || !message.trim() || message.trim().length > 5000) {
+    res.status(400).json({ error: 'Notification message is required and must be 5,000 characters or fewer.' });
+    return;
+  }
+  const notification = db.updateNotification(req.params.id, title.trim(), message.trim(), req.user!.email);
+  if (!notification) {
+    res.status(404).json({ error: 'Notification not found.' });
+    return;
+  }
+  res.json(notification);
+});
+
+app.delete('/api/notifications/:id', requireAdmin, (req: AuthenticatedRequest, res) => {
+  if (!db.deleteNotification(req.params.id, req.user!.email)) {
+    res.status(404).json({ error: 'Notification not found.' });
+    return;
+  }
+  res.json({ success: true });
+});
+
 // Get Resources for a Unit
 app.get('/api/resources', authMiddleware, (req, res) => {
   const { unitId } = req.query;
@@ -486,7 +554,39 @@ app.post('/api/resources', requireAdmin, (req: AuthenticatedRequest, res) => {
 // Update Resource (Admin)
 app.put('/api/resources/:id', requireAdmin, (req: AuthenticatedRequest, res) => {
   const { id } = req.params;
-  const updated = db.updateResource(id, req.body, req.user!.email);
+  const resource = db.getResources().find(item => item.id === id);
+  if (!resource) {
+    res.status(404).json({ error: 'Resource not found' });
+    return;
+  }
+  if (resource.type !== 'note' && resource.type !== 'code') {
+    res.status(400).json({ error: 'Only written notes and code can be edited in this section.' });
+    return;
+  }
+  const { unitId, title, description, type, content, codeLanguage, isPublished } = req.body;
+  if (
+    typeof unitId !== 'string' ||
+    !db.getUnits().some(unit => unit.id === unitId) ||
+    typeof title !== 'string' ||
+    !title.trim() ||
+    (type !== 'note' && type !== 'code') ||
+    typeof content !== 'string' ||
+    typeof isPublished !== 'boolean' ||
+    (description !== undefined && typeof description !== 'string') ||
+    (type === 'code' && codeLanguage !== undefined && typeof codeLanguage !== 'string')
+  ) {
+    res.status(400).json({ error: 'Provide a valid unit, title, content type, content, and publication status.' });
+    return;
+  }
+  const updated = db.updateResource(id, {
+    unitId,
+    title: title.trim(),
+    description: typeof description === 'string' ? description.trim() : '',
+    type,
+    content,
+    codeLanguage: type === 'code' ? codeLanguage || 'java' : undefined,
+    isPublished,
+  }, req.user!.email);
   if (!updated) {
     res.status(404).json({ error: 'Resource not found' });
     return;
@@ -495,14 +595,24 @@ app.put('/api/resources/:id', requireAdmin, (req: AuthenticatedRequest, res) => 
 });
 
 // Delete Resource (Admin)
-app.delete('/api/resources/:id', requireAdmin, (req: AuthenticatedRequest, res) => {
+app.delete('/api/resources/:id', requireAdmin, async (req: AuthenticatedRequest, res, next) => {
   const { id } = req.params;
-  const success = db.deleteResource(id, req.user!.email);
-  if (!success) {
+  const resource = db.getResources().find(item => item.id === id);
+  if (!resource) {
     res.status(404).json({ error: 'Resource not found' });
     return;
   }
-  res.json({ success: true });
+  try {
+    const files = db.getResourceFiles().filter(file => file.resourceId === id);
+    await Promise.all(files.map(file => deleteStoredFile(file.storagePath)));
+    if (!db.deleteResource(id, req.user!.email)) {
+      res.status(404).json({ error: 'Resource not found' });
+      return;
+    }
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
 });
 
 // Attach File to Existing Resource (Admin)
@@ -543,15 +653,214 @@ app.post('/api/resources/:id/files', requireAdmin, upload.array('files', 10), as
   }
 });
 
+app.get('/api/resources/quick-upload/mode', requireAdmin, (_req, res) => {
+  res.json({ directUpload: usesDirectUploads() });
+});
+
+app.post('/api/resources/quick-upload/presign', requireAdmin, async (req: AuthenticatedRequest, res, next) => {
+  const { unitId, title, files } = req.body;
+  if (typeof unitId !== 'string' || !db.getUnits().some(unit => unit.id === unitId)) {
+    res.status(400).json({ error: 'Select a valid unit before uploading.' });
+    return;
+  }
+  if (typeof title !== 'string' || !title.trim()) {
+    res.status(400).json({ error: 'A resource title is required.' });
+    return;
+  }
+  if (!Array.isArray(files) || files.length === 0 || files.length > MAX_UPLOAD_FILES) {
+    res.status(400).json({ error: `Select between 1 and ${MAX_UPLOAD_FILES} files.` });
+    return;
+  }
+
+  const uploadDetails: { name: string; size: number; mimeType: string }[] = [];
+  for (const file of files) {
+    if (
+      typeof file?.name !== 'string' ||
+      !file.name.trim() ||
+      file.name.length > 255 ||
+      !Number.isSafeInteger(file.size) ||
+      file.size < 0 ||
+      file.size > MAX_UPLOAD_SIZE ||
+      (file.type !== undefined && (typeof file.type !== 'string' || file.type.length > 255))
+    ) {
+      res.status(400).json({ error: 'Each file must have a name and be no larger than 50 MB.' });
+      return;
+    }
+    uploadDetails.push({
+      name: file.name,
+      size: file.size,
+      mimeType: typeof file.type === 'string' && file.type.trim() && !/[\r\n]/.test(file.type)
+        ? file.type.trim()
+        : 'application/octet-stream',
+    });
+  }
+
+  try {
+    const uploads = await Promise.all(uploadDetails.map(async file => {
+      const uploadId = crypto.randomUUID();
+      return {
+        uploadId,
+        originalName: file.name,
+        sizeBytes: file.size,
+        mimeType: file.mimeType,
+        headers: {
+          'Content-Type': file.mimeType,
+          'x-amz-meta-upload-id': uploadId,
+        },
+        uploadUrl: await createPresignedUpload(uploadId, file.mimeType),
+      };
+    }));
+    res.json({ uploads });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/resources/quick-upload/cleanup', requireAdmin, async (req, res, next) => {
+  const { uploadIds } = req.body;
+  if (
+    !Array.isArray(uploadIds) ||
+    uploadIds.length > MAX_UPLOAD_FILES ||
+    uploadIds.some((id: unknown) => typeof id !== 'string' || !UPLOAD_ID_PATTERN.test(id))
+  ) {
+    res.status(400).json({ error: 'Invalid pending upload IDs.' });
+    return;
+  }
+
+  try {
+    const removed: string[] = [];
+    for (const uploadId of uploadIds as string[]) {
+      const upload = await inspectPresignedUpload(uploadId);
+      if (upload && db.getResourceFiles().some(file => file.storagePath === upload.storagePath)) continue;
+      await deletePresignedUpload(uploadId);
+      removed.push(uploadId);
+    }
+    res.json({ removed });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Quick Upload: Upload File and Create Resource automatically (Admin)
 app.post('/api/resources/quick-upload', requireAdmin, upload.array('files', 10), async (req: AuthenticatedRequest, res, next) => {
   const { unitId, title, description, type } = req.body;
-  if (!unitId || !title) {
+  if (
+    typeof unitId !== 'string' ||
+    !db.getUnits().some(unit => unit.id === unitId) ||
+    typeof title !== 'string' ||
+    !title.trim()
+  ) {
     res.status(400).json({ error: 'Unit ID and title are required.' });
     return;
   }
 
   const files = (req.files as Express.Multer.File[]) || [];
+  const directUploads = req.body.uploads;
+  if (Array.isArray(directUploads)) {
+    if (files.length > 0 || directUploads.length === 0 || directUploads.length > MAX_UPLOAD_FILES) {
+      res.status(400).json({ error: 'Invalid upload completion request.' });
+      return;
+    }
+
+    const completedUploads: {
+      uploadId: string;
+      originalName: string;
+      mimeType: string;
+      fileName: string;
+      storagePath: string;
+      sizeBytes: number;
+    }[] = [];
+    const seenUploadIds = new Set<string>();
+    try {
+      for (const uploadInfo of directUploads) {
+        if (
+          typeof uploadInfo?.uploadId !== 'string' ||
+          !UPLOAD_ID_PATTERN.test(uploadInfo.uploadId) ||
+          typeof uploadInfo.originalName !== 'string' ||
+          !uploadInfo.originalName.trim() ||
+          uploadInfo.originalName.length > 255 ||
+          !Number.isSafeInteger(uploadInfo.sizeBytes) ||
+          uploadInfo.sizeBytes < 0 ||
+          typeof uploadInfo.mimeType !== 'string' ||
+          uploadInfo.mimeType.length > 255
+        ) {
+          res.status(400).json({ error: 'Invalid uploaded file details.' });
+          return;
+        }
+        if (seenUploadIds.has(uploadInfo.uploadId)) {
+          res.status(400).json({ error: 'The same uploaded file cannot be attached more than once.' });
+          return;
+        }
+        seenUploadIds.add(uploadInfo.uploadId);
+
+        const storedUpload = await inspectPresignedUpload(uploadInfo.uploadId);
+        if (
+          !storedUpload ||
+          storedUpload.metadataUploadId !== uploadInfo.uploadId ||
+          storedUpload.sizeBytes !== uploadInfo.sizeBytes ||
+          storedUpload.sizeBytes > MAX_UPLOAD_SIZE ||
+          storedUpload.mimeType !== uploadInfo.mimeType
+        ) {
+          res.status(400).json({ error: `The uploaded file "${uploadInfo.originalName}" is missing or does not match its upload details.` });
+          return;
+        }
+        if (db.getResourceFiles().some(file => file.storagePath === storedUpload.storagePath)) {
+          res.status(409).json({ error: `The uploaded file "${uploadInfo.originalName}" has already been attached.` });
+          return;
+        }
+
+        const ext = path.extname(uploadInfo.originalName);
+        const safeBase = path.basename(uploadInfo.originalName, ext).replace(/[^a-zA-Z0-9_-]/g, '_') || 'file';
+        completedUploads.push({
+          uploadId: uploadInfo.uploadId,
+          originalName: uploadInfo.originalName,
+          mimeType: storedUpload.mimeType,
+          fileName: `${safeBase}-${uploadInfo.uploadId}${ext}`,
+          storagePath: storedUpload.storagePath,
+          sizeBytes: storedUpload.sizeBytes,
+        });
+      }
+
+      const detectedCodeLanguage = completedUploads.length === 1
+        ? detectLanguageFromFilename(completedUploads[0].originalName)
+        : 'plaintext';
+      const codeContent = detectedCodeLanguage !== 'plaintext' && completedUploads[0].sizeBytes <= 1024 * 1024
+        ? await readPresignedUploadText(completedUploads[0].uploadId, 1024 * 1024) ?? ''
+        : '';
+      const codeLanguage = codeContent ? detectedCodeLanguage : 'plaintext';
+      const now = new Date().toISOString();
+      const resource = db.addResource({
+        id: 'res-' + crypto.randomUUID(),
+        unitId,
+        title: title.trim(),
+        description: typeof description === 'string' ? description.trim() : '',
+        type: type || (codeLanguage !== 'plaintext' ? 'code' : 'file'),
+        content: codeContent,
+        codeLanguage: codeLanguage !== 'plaintext' ? codeLanguage : undefined,
+        isPublished: true,
+        authorEmail: req.user!.email,
+        files: [],
+        createdAt: now,
+        updatedAt: now
+      }, req.user!.email);
+      const attached = completedUploads.map(uploadInfo => db.addResourceFile({
+        id: 'file-' + crypto.randomUUID(),
+        resourceId: resource.id,
+        originalName: uploadInfo.originalName,
+        fileName: uploadInfo.fileName,
+        mimeType: uploadInfo.mimeType,
+        sizeBytes: uploadInfo.sizeBytes,
+        storagePath: uploadInfo.storagePath,
+        uploaderEmail: req.user!.email,
+        createdAt: now
+      }, req.user!.email));
+      res.status(201).json({ ...resource, files: attached });
+    } catch (error) {
+      next(error);
+    }
+    return;
+  }
+
   const now = new Date().toISOString();
   const resId = 'res-' + crypto.randomUUID();
 
@@ -749,6 +1058,25 @@ app.get('/api/admin/audit-logs', requireAdmin, (_req, res) => {
 app.post('/api/admin/reset-demo', requireAdmin, (_req, res) => {
   db.resetToDefault();
   res.json({ success: true, message: 'Reset to standard GPREC syllabus curriculum' });
+});
+
+app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
+  if (res.headersSent) {
+    next(error);
+    return;
+  }
+
+  if (error instanceof multer.MulterError) {
+    const status = error.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+    const message = error.code === 'LIMIT_FILE_SIZE'
+      ? 'File exceeds the 50 MB upload limit.'
+      : `Upload rejected: ${error.message}`;
+    res.status(status).json({ error: message });
+    return;
+  }
+
+  console.error('API request failed:', error);
+  res.status(500).json({ error: 'The request failed due to a server error.' });
 });
 
 // ==========================================

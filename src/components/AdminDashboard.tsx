@@ -7,6 +7,7 @@ import {
   Resource,
   AdminStats,
   User,
+  FacultyNotification,
   SubjectCategory,
   ResourceType
 } from '../lib/types.js';
@@ -18,6 +19,7 @@ import {
   FolderTree,
   FileEdit,
   UploadCloud,
+  Bell,
   Users,
   Plus,
   Trash2,
@@ -49,6 +51,65 @@ interface AdminDashboardProps {
   currentUser: User;
 }
 
+interface PresignedUpload {
+  uploadId: string;
+  originalName: string;
+  sizeBytes: number;
+  mimeType: string;
+  headers: { 'Content-Type': string; 'x-amz-meta-upload-id': string };
+  uploadUrl: string;
+}
+
+function isPresignResponse(value: unknown): value is { uploads: PresignedUpload[] } {
+  return typeof value === 'object' &&
+    value !== null &&
+    'uploads' in value &&
+    Array.isArray(value.uploads) &&
+    value.uploads.every(upload =>
+      typeof upload === 'object' &&
+      upload !== null &&
+      'uploadId' in upload &&
+      typeof upload.uploadId === 'string' &&
+      'originalName' in upload &&
+      typeof upload.originalName === 'string' &&
+      'sizeBytes' in upload &&
+      typeof upload.sizeBytes === 'number' &&
+      'mimeType' in upload &&
+      typeof upload.mimeType === 'string' &&
+      'headers' in upload &&
+      typeof upload.headers === 'object' &&
+      upload.headers !== null &&
+      'Content-Type' in upload.headers &&
+      typeof upload.headers['Content-Type'] === 'string' &&
+      'x-amz-meta-upload-id' in upload.headers &&
+      typeof upload.headers['x-amz-meta-upload-id'] === 'string' &&
+      'uploadUrl' in upload &&
+      typeof upload.uploadUrl === 'string'
+    );
+}
+
+async function getUploadError(response: Response): Promise<string> {
+  const responseText = await response.text();
+  try {
+    const responseBody: unknown = JSON.parse(responseText);
+    if (
+      typeof responseBody === 'object' &&
+      responseBody !== null &&
+      'error' in responseBody &&
+      typeof responseBody.error === 'string'
+    ) {
+      return responseBody.error;
+    }
+  } catch {
+    // Platform-generated errors may be HTML instead of the API's JSON response.
+  }
+
+  if (response.status === 413) {
+    return 'The upload request is too large. Try fewer or smaller files.';
+  }
+  return `Upload failed (HTTP ${response.status}). The server did not return a readable error; check Vercel function logs.`;
+}
+
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   years,
   semesters,
@@ -57,7 +118,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   currentUser
 }) => {
   const [activeTab, setActiveTab] = useState<
-    'overview' | 'structure' | 'units' | 'notes-write' | 'file-upload' | 'resources-list' | 'users'
+    'overview' | 'structure' | 'units' | 'notes-write' | 'file-upload' | 'notifications' | 'users'
   >('overview');
 
   const [stats, setStats] = useState<AdminStats | null>(null);
@@ -69,6 +130,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [isUpdatingStudentLogin, setIsUpdatingStudentLogin] = useState(false);
   const [loadingStats, setLoadingStats] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{ text: string; isError?: boolean } | null>(null);
+  const [writtenResources, setWrittenResources] = useState<Resource[]>([]);
+  const [editingResourceId, setEditingResourceId] = useState<string | null>(null);
+  const [notifications, setNotifications] = useState<FacultyNotification[]>([]);
+  const [notificationTitle, setNotificationTitle] = useState('');
+  const [notificationMessage, setNotificationMessage] = useState('');
+  const [editingNotificationId, setEditingNotificationId] = useState<string | null>(null);
 
   // Subject Form Modal / State
   const [isEditingSubject, setIsEditingSubject] = useState(false);
@@ -127,7 +194,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   // Delete Confirmation Modal
   const [deleteConfirm, setDeleteConfirm] = useState<{
-    type: 'subject' | 'unit' | 'resource';
+    type: 'subject' | 'unit' | 'resource' | 'notification';
     id: string;
     name: string;
   } | null>(null);
@@ -139,10 +206,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       const token = localStorage.getItem('gprec_token');
       const headers = { Authorization: `Bearer ${token}` };
 
-      const [statsRes, usersRes, studentLoginRes] = await Promise.all([
+      const [statsRes, usersRes, studentLoginRes, resourcesRes, notificationsRes] = await Promise.all([
         fetch('/api/admin/stats', { headers }),
         fetch('/api/admin/users', { headers }),
-        fetch('/api/admin/student-login', { headers })
+        fetch('/api/admin/student-login', { headers }),
+        fetch('/api/resources', { headers }),
+        fetch('/api/notifications', { headers })
       ]);
 
       if (statsRes.ok) {
@@ -158,6 +227,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         setSharedStudentUserId(studentLoginData.userId || '');
         setNewSharedStudentUserId(studentLoginData.userId || '');
       }
+      if (resourcesRes.ok) {
+        const resources: Resource[] = await resourcesRes.json();
+        setWrittenResources(resources.filter(resource => resource.type === 'note' || resource.type === 'code'));
+      }
+      if (notificationsRes.ok) setNotifications(await notificationsRes.json() as FacultyNotification[]);
     } catch (err) {
       console.error('Failed to load admin dashboard data:', err);
     } finally {
@@ -183,26 +257,39 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   // Fetch Units when Subject for Unit management changes
   useEffect(() => {
-    if (!selectedSubjectForUnits) return;
+    if (!selectedSubjectForUnits) {
+      setCurrentSubjectUnits([]);
+      setNoteTargetUnitId('');
+      setUploadTargetUnitId('');
+      return;
+    }
+
+    let isCurrentRequest = true;
+    setCurrentSubjectUnits([]);
+
     const fetchUnits = async () => {
       try {
         const token = localStorage.getItem('gprec_token');
         const res = await fetch(`/api/academic/units?subjectId=${selectedSubjectForUnits}`, {
           headers: { Authorization: `Bearer ${token}` }
         });
-        if (res.ok) {
-          const data = await res.json();
-          setCurrentSubjectUnits(data);
-          if (data.length > 0 && !noteTargetUnitId) {
-            setNoteTargetUnitId(data[0].id);
-            setUploadTargetUnitId(data[0].id);
-          }
-        }
+        if (!res.ok) throw new Error('Could not load units for the selected subject.');
+
+        const data: Unit[] = await res.json();
+        if (!isCurrentRequest) return;
+        setCurrentSubjectUnits(data);
+        const firstUnitId = data[0]?.id ?? '';
+        setNoteTargetUnitId(previous => data.some(unit => unit.id === previous) ? previous : firstUnitId);
+        setUploadTargetUnitId(previous => data.some(unit => unit.id === previous) ? previous : firstUnitId);
       } catch (e) {
-        console.error(e);
+        if (isCurrentRequest) console.error('Failed to load units for the selected subject:', e);
       }
     };
-    fetchUnits();
+
+    void fetchUnits();
+    return () => {
+      isCurrentRequest = false;
+    };
   }, [selectedSubjectForUnits]);
 
   // Flash message helper
@@ -370,8 +457,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     const token = localStorage.getItem('gprec_token');
     try {
-      const res = await fetch('/api/resources', {
-        method: 'POST',
+      const res = await fetch(editingResourceId ? `/api/resources/${editingResourceId}` : '/api/resources', {
+        method: editingResourceId ? 'PUT' : 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`
@@ -387,15 +474,91 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         })
       });
 
-      if (!res.ok) throw new Error((await res.json()).error || 'Failed to publish resource');
-      showToast('Learning resource published to students');
+      if (!res.ok) throw new Error((await res.json()).error || 'Failed to save resource');
+      const savedResource: Resource = await res.json();
+      showToast(editingResourceId ? 'Learning resource updated' : 'Learning resource published to students');
+      setWrittenResources(previous => editingResourceId
+        ? previous.map(resource => resource.id === savedResource.id ? savedResource : resource)
+        : [savedResource, ...previous]);
+      setEditingResourceId(null);
       setNoteTitle('');
       setNoteDescription('');
       setNoteContent('');
+      setNoteCodeLang('java');
+      setNoteType('note');
+      setNoteIsPublished(true);
       loadAdminData();
       onRefreshData();
     } catch (err: any) {
       showToast(err.message, true);
+    }
+  };
+
+  const handleEditWrittenResource = async (resource: Resource) => {
+    try {
+      const token = localStorage.getItem('gprec_token');
+      const response = await fetch('/api/academic/units', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) throw new Error('Could not load units for this resource.');
+      const units: Unit[] = await response.json();
+      const unit = units.find(item => item.id === resource.unitId);
+      if (!unit) throw new Error('The unit for this resource no longer exists.');
+
+      setSelectedSubjectForUnits(unit.subjectId);
+      setNoteTargetUnitId(resource.unitId);
+      setEditingResourceId(resource.id);
+      setNoteType(resource.type === 'code' ? 'code' : 'note');
+      setNoteTitle(resource.title);
+      setNoteDescription(resource.description);
+      setNoteContent(resource.content);
+      setNoteCodeLang(resource.codeLanguage || 'java');
+      setNoteIsPublished(resource.isPublished);
+      document.getElementById('written-resource-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not open this resource for editing.', true);
+    }
+  };
+
+  const resetWrittenResourceForm = () => {
+    setEditingResourceId(null);
+    setNoteTitle('');
+    setNoteDescription('');
+    setNoteContent('');
+    setNoteCodeLang('java');
+    setNoteType('note');
+    setNoteIsPublished(true);
+  };
+
+  const handleSaveNotification = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const token = localStorage.getItem('gprec_token');
+    try {
+      const response = await fetch(
+        editingNotificationId ? `/api/notifications/${editingNotificationId}` : '/api/notifications',
+        {
+          method: editingNotificationId ? 'PUT' : 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`
+          },
+          body: JSON.stringify({ title: notificationTitle, message: notificationMessage })
+        }
+      );
+      if (!response.ok) {
+        const body = await response.json();
+        throw new Error(body.error || 'Could not save notification.');
+      }
+      const savedNotification: FacultyNotification = await response.json();
+      setNotifications(previous => editingNotificationId
+        ? previous.map(item => item.id === savedNotification.id ? savedNotification : item)
+        : [savedNotification, ...previous]);
+      setNotificationTitle('');
+      setNotificationMessage('');
+      setEditingNotificationId(null);
+      showToast(editingNotificationId ? 'Notification updated' : 'Notification shared with students');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not save notification.', true);
     }
   };
 
@@ -404,15 +567,109 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   // ----------------------------------------
   const handleUploadFiles = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!uploadTargetUnitId || !uploadTitle || selectedFiles.length === 0) {
-      showToast('Please select a unit, specify title, and add at least one file', true);
+    if (!uploadTargetUnitId) {
+      showToast('Create or select a unit before uploading files.', true);
+      return;
+    }
+    if (!uploadTitle.trim()) {
+      showToast('Enter a title for the uploaded files.', true);
+      return;
+    }
+    if (selectedFiles.length === 0) {
+      showToast('Add at least one file to upload.', true);
+      return;
+    }
+    if (selectedFiles.length > 10) {
+      showToast('You can upload up to 10 files at a time.', true);
+      return;
+    }
+    const oversizedFile = selectedFiles.find(file => file.size > 50 * 1024 * 1024);
+    if (oversizedFile) {
+      showToast(`${oversizedFile.name} exceeds the 50 MB per-file limit.`, true);
       return;
     }
 
     setIsUploading(true);
     const token = localStorage.getItem('gprec_token');
+    const pendingUploadIds: string[] = [];
 
     try {
+      const authHeaders = { Authorization: `Bearer ${token}` };
+      const modeResponse = await fetch('/api/resources/quick-upload/mode', { headers: authHeaders });
+      if (!modeResponse.ok) throw new Error(await getUploadError(modeResponse));
+      const mode: unknown = await modeResponse.json();
+
+      if (
+        typeof mode === 'object' &&
+        mode !== null &&
+        'directUpload' in mode &&
+        mode.directUpload === true
+      ) {
+        const presignResponse = await fetch('/api/resources/quick-upload/presign', {
+          method: 'POST',
+          headers: { ...authHeaders, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            unitId: uploadTargetUnitId,
+            title: uploadTitle,
+            files: selectedFiles.map(file => ({ name: file.name, size: file.size, type: file.type }))
+          })
+        });
+        if (!presignResponse.ok) throw new Error(await getUploadError(presignResponse));
+        const presignBody: unknown = await presignResponse.json();
+        if (!isPresignResponse(presignBody) || presignBody.uploads.length !== selectedFiles.length) {
+          throw new Error('The server returned an invalid upload request.');
+        }
+
+        pendingUploadIds.push(...presignBody.uploads.map(upload => upload.uploadId));
+        const results = await Promise.allSettled(presignBody.uploads.map(async (upload, index) => {
+          const file = selectedFiles[index];
+          let storageResponse: Response;
+          try {
+            storageResponse = await fetch(upload.uploadUrl, {
+              method: 'PUT',
+              headers: upload.headers,
+              body: file
+            });
+          } catch {
+            throw new Error(
+              `Could not connect to file storage for "${file.name}". Check the bucket CORS rules and storage endpoint.`
+            );
+          }
+          if (!storageResponse.ok) {
+            throw new Error(
+              `Storage rejected "${file.name}" (HTTP ${storageResponse.status}). Check the bucket CORS rules and try again.`
+            );
+          }
+        }));
+        const failedUpload = results.find(result => result.status === 'rejected');
+        if (failedUpload?.status === 'rejected') throw failedUpload.reason;
+
+        const finalizeResponse = await fetch('/api/resources/quick-upload', {
+          method: 'POST',
+          headers: { ...authHeaders, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            unitId: uploadTargetUnitId,
+            title: uploadTitle,
+            description: uploadDescription,
+            uploads: presignBody.uploads.map(upload => ({
+              uploadId: upload.uploadId,
+              originalName: upload.originalName,
+              sizeBytes: upload.sizeBytes,
+              mimeType: upload.mimeType
+            }))
+          })
+        });
+        if (!finalizeResponse.ok) throw new Error(await getUploadError(finalizeResponse));
+
+        showToast(`Successfully uploaded ${selectedFiles.length} file(s)`);
+        setUploadTitle('');
+        setUploadDescription('');
+        setSelectedFiles([]);
+        loadAdminData();
+        onRefreshData();
+        return;
+      }
+
       const formData = new FormData();
       formData.append('unitId', uploadTargetUnitId);
       formData.append('title', uploadTitle);
@@ -427,15 +684,32 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         body: formData
       });
 
-      if (!res.ok) throw new Error((await res.json()).error || 'Failed to upload files');
+      if (!res.ok) throw new Error(await getUploadError(res));
       showToast(`Successfully uploaded ${selectedFiles.length} file(s)`);
       setUploadTitle('');
       setUploadDescription('');
       setSelectedFiles([]);
       loadAdminData();
       onRefreshData();
-    } catch (err: any) {
-      showToast(err.message, true);
+    } catch (err: unknown) {
+      if (pendingUploadIds.length > 0) {
+        try {
+          const cleanupResponse = await fetch('/api/resources/quick-upload/cleanup', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ uploadIds: pendingUploadIds })
+          });
+          if (!cleanupResponse.ok) {
+            console.error('Failed to clean up incomplete uploads:', await getUploadError(cleanupResponse));
+          }
+        } catch (cleanupError) {
+          console.error('Failed to clean up incomplete uploads:', cleanupError);
+        }
+      }
+      showToast(err instanceof Error ? err.message : 'Failed to upload files.', true);
     } finally {
       setIsUploading(false);
     }
@@ -454,11 +728,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       if (deleteConfirm.type === 'subject') endpoint = `/api/academic/subjects/${deleteConfirm.id}`;
       else if (deleteConfirm.type === 'unit') endpoint = `/api/academic/units/${deleteConfirm.id}`;
       else if (deleteConfirm.type === 'resource') endpoint = `/api/resources/${deleteConfirm.id}`;
+      else if (deleteConfirm.type === 'notification') endpoint = `/api/notifications/${deleteConfirm.id}`;
 
       const res = await fetch(endpoint, { method: 'DELETE', headers });
-      if (!res.ok) throw new Error('Delete operation failed');
+      if (!res.ok) {
+        const body = await res.json();
+        throw new Error(body.error || 'Delete operation failed');
+      }
 
       showToast(`Deleted ${deleteConfirm.name}`);
+      if (deleteConfirm.type === 'resource') {
+        setWrittenResources(previous => previous.filter(resource => resource.id !== deleteConfirm.id));
+        if (editingResourceId === deleteConfirm.id) resetWrittenResourceForm();
+      }
+      if (deleteConfirm.type === 'notification') {
+        setNotifications(previous => previous.filter(item => item.id !== deleteConfirm.id));
+        if (editingNotificationId === deleteConfirm.id) {
+          setEditingNotificationId(null);
+          setNotificationTitle('');
+          setNotificationMessage('');
+        }
+      }
       setDeleteConfirm(null);
 
       // Refresh list
@@ -607,6 +897,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         >
           <UploadCloud className="w-4 h-4" />
           <span>Upload Files</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('notifications')}
+          className={`px-4 py-2.5 rounded-xl transition-all flex items-center gap-2 shrink-0 ${
+            activeTab === 'notifications'
+              ? 'bg-blue-600 text-white shadow'
+              : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+          }`}
+        >
+          <Bell className="w-4 h-4" />
+          <span>Faculty Notifications</span>
         </button>
 
         <button
@@ -1184,10 +1486,61 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               Method 1: Author Academic Notes or Laboratory Code
             </h2>
             <p className="text-xs text-slate-500 mt-1">
-              Create structured rich-text notes with headings, tables, formulas, and code blocks, or publish clean lab programs.
+              Create structured rich-text notes with headings, tables, formulas, and code blocks, or select a published resource below to edit or delete it.
             </p>
 
-            <form onSubmit={handleCreateResource} className="mt-6 space-y-4">
+            <div className="mt-5 space-y-2">
+              <h3 className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                Written Notes & Code
+              </h3>
+              {writtenResources.length === 0 ? (
+                <p className="rounded-xl border border-dashed border-slate-300 p-4 text-sm text-slate-500 dark:border-slate-700">
+                  No written notes or code have been published yet.
+                </p>
+              ) : (
+                writtenResources.map(resource => (
+                  <div
+                    key={resource.id}
+                    className="flex flex-col gap-3 rounded-xl border border-slate-200 p-3 sm:flex-row sm:items-center sm:justify-between dark:border-slate-700"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-slate-900 dark:text-white">{resource.title}</p>
+                      <p className="mt-1 text-[11px] text-slate-500">
+                        {resource.type === 'code' ? 'Lab code' : 'Theory note'} · {resource.isPublished ? 'Published' : 'Draft'}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void handleEditWrittenResource(resource)}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-50 dark:border-slate-700 dark:text-blue-300 dark:hover:bg-slate-800"
+                      >
+                        <Edit3 className="h-3.5 w-3.5" />
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDeleteConfirm({ type: 'resource', id: resource.id, name: resource.title })}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-50 dark:border-slate-700 dark:text-rose-300 dark:hover:bg-slate-800"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <form id="written-resource-form" onSubmit={handleCreateResource} className="mt-6 space-y-4">
+              {editingResourceId && (
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-blue-50 px-4 py-3 text-sm text-blue-900 dark:bg-blue-950/50 dark:text-blue-200">
+                  <span className="font-semibold">Editing a written resource. Saving will update the existing student-facing content.</span>
+                  <button type="button" onClick={resetWrittenResourceForm} className="font-bold underline">
+                    Cancel edit
+                  </button>
+                </div>
+              )}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
@@ -1293,21 +1646,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       ))}
                     </select>
                   </div>
-                ) : (
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                      Publication Status
-                    </label>
-                    <select
-                      value={noteIsPublished ? 'published' : 'draft'}
-                      onChange={(e) => setNoteIsPublished(e.target.value === 'published')}
-                      className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-semibold"
-                    >
-                      <option value="published">Published for Students</option>
-                      <option value="draft">Save as Draft</option>
-                    </select>
-                  </div>
-                )}
+                ) : null}
+              </div>
+
+              <div className="max-w-sm">
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  Publication Status
+                </label>
+                <select
+                  value={noteIsPublished ? 'published' : 'draft'}
+                  onChange={(e) => setNoteIsPublished(e.target.value === 'published')}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-semibold"
+                >
+                  <option value="published">Published for Students</option>
+                  <option value="draft">Save as Draft</option>
+                </select>
               </div>
 
               <div>
@@ -1410,7 +1763,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   type="submit"
                   className="px-6 py-2.5 rounded-xl font-bold text-sm bg-blue-600 hover:bg-blue-700 text-white shadow-md hover:shadow-lg transition-all"
                 >
-                  Publish Resource
+                  {editingResourceId ? 'Save Resource Changes' : 'Publish Resource'}
                 </button>
               </div>
             </form>
@@ -1430,6 +1783,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </p>
 
             <form onSubmit={handleUploadFiles} className="mt-6 space-y-4">
+              {currentSubjectUnits.length === 0 && (
+                <div className="flex flex-col gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200 sm:flex-row sm:items-center sm:justify-between">
+                  <p>
+                    {subjects.length === 0
+                      ? 'Create a subject and unit before uploading files.'
+                      : 'This subject has no units yet. Create a unit before uploading files.'}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab(subjects.length === 0 ? 'structure' : 'units')}
+                    className="shrink-0 rounded-lg bg-amber-100 px-3 py-2 text-xs font-bold text-amber-900 hover:bg-amber-200 dark:bg-amber-900/60 dark:text-amber-100 dark:hover:bg-amber-900"
+                  >
+                    {subjects.length === 0 ? 'Create a subject' : 'Create a unit'}
+                  </button>
+                </div>
+              )}
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
@@ -1456,8 +1826,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     value={uploadTargetUnitId}
                     onChange={(e) => setUploadTargetUnitId(e.target.value)}
                     required
+                    disabled={currentSubjectUnits.length === 0}
                     className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm"
                   >
+                    <option value="" disabled>
+                      {currentSubjectUnits.length === 0 ? 'No units available' : 'Select a unit'}
+                    </option>
                     {currentSubjectUnits.map(u => (
                       <option key={u.id} value={u.id}>
                         Unit {u.unitNumber}: {u.title}
@@ -1508,7 +1882,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <div className="flex items-center justify-end pt-4">
                 <button
                   type="submit"
-                  disabled={isUploading || selectedFiles.length === 0}
+                  disabled={isUploading || currentSubjectUnits.length === 0 || !uploadTitle.trim() || selectedFiles.length === 0}
                   className="px-6 py-2.5 rounded-xl font-bold text-sm bg-blue-600 hover:bg-blue-700 text-white shadow-md disabled:opacity-50 transition-all flex items-center gap-2"
                 >
                   <UploadCloud className="w-4 h-4" />
@@ -1520,7 +1894,121 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       )}
 
-      {/* TAB 6: Portal Accounts */}
+      {activeTab === 'notifications' && (
+        <div className="space-y-6">
+          <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            <h2 className="flex items-center gap-2 text-lg font-bold text-slate-900 dark:text-white">
+              <Bell className="h-5 w-5 text-amber-500" />
+              Faculty Notifications
+            </h2>
+            <p className="mt-1 text-xs text-slate-500">
+              Share announcements with students. Students can read notifications but cannot create, edit, or delete them.
+            </p>
+
+            <form onSubmit={handleSaveNotification} className="mt-5 space-y-4">
+              <div>
+                <label htmlFor="notification-title" className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                  Notification Title
+                </label>
+                <input
+                  id="notification-title"
+                  required
+                  maxLength={160}
+                  value={notificationTitle}
+                  onChange={event => setNotificationTitle(event.target.value)}
+                  placeholder="For example, Revised lab schedule"
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-800"
+                />
+              </div>
+              <div>
+                <label htmlFor="notification-message" className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                  Message
+                </label>
+                <textarea
+                  id="notification-message"
+                  required
+                  maxLength={5000}
+                  rows={5}
+                  value={notificationMessage}
+                  onChange={event => setNotificationMessage(event.target.value)}
+                  placeholder="Write the announcement for your students..."
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-800"
+                />
+                <p className="mt-1 text-right text-[11px] text-slate-400">{notificationMessage.length}/5000</p>
+              </div>
+              <div className="flex flex-wrap justify-end gap-2">
+                {editingNotificationId && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingNotificationId(null);
+                      setNotificationTitle('');
+                      setNotificationMessage('');
+                    }}
+                    className="rounded-xl px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+                  >
+                    Cancel
+                  </button>
+                )}
+                <button
+                  type="submit"
+                  className="rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-bold text-white hover:bg-blue-700"
+                >
+                  {editingNotificationId ? 'Save Notification' : 'Share Notification'}
+                </button>
+              </div>
+            </form>
+          </section>
+
+          <section className="space-y-3">
+            <h3 className="text-sm font-bold text-slate-900 dark:text-white">Shared with Students ({notifications.length})</h3>
+            {notifications.length === 0 ? (
+              <p className="rounded-2xl border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500 dark:border-slate-700">
+                No notifications have been shared yet.
+              </p>
+            ) : notifications.map(notification => (
+              <article key={notification.id} className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0">
+                    <h4 className="font-bold text-slate-900 dark:text-white">{notification.title}</h4>
+                    <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-700 dark:text-slate-300">
+                      {notification.message}
+                    </p>
+                    <p className="mt-3 text-[11px] text-slate-500">
+                      Updated {new Date(notification.updatedAt).toLocaleString()}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingNotificationId(notification.id);
+                        setNotificationTitle(notification.title);
+                        setNotificationMessage(notification.message);
+                        document.getElementById('notification-title')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-50 dark:border-slate-700 dark:text-blue-300 dark:hover:bg-slate-800"
+                    >
+                      <Edit3 className="h-3.5 w-3.5" />
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDeleteConfirm({ type: 'notification', id: notification.id, name: notification.title })}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-50 dark:border-slate-700 dark:text-rose-300 dark:hover:bg-slate-800"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              </article>
+            ))}
+          </section>
+        </div>
+      )}
+
+      {/* TAB 7: Portal Accounts */}
       {activeTab === 'users' && (
         <div className="space-y-6">
           <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm">

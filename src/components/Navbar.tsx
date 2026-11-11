@@ -2,6 +2,7 @@ import React from 'react';
 import {
   GraduationCap,
   ShieldCheck,
+  Bell,
   Search,
   Sun,
   Moon,
@@ -19,6 +20,7 @@ interface NavbarProps {
   onViewChange: (view: 'student' | 'admin') => void;
   onOpenAuth: (role?: 'student' | 'admin') => void;
   onOpenSearch: () => void;
+  onOpenNotifications: () => void;
   onLogout: () => void;
   isDark: boolean;
   onToggleTheme: () => void;
@@ -30,6 +32,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onViewChange,
   onOpenAuth,
   onOpenSearch,
+  onOpenNotifications,
   onLogout,
   isDark,
   onToggleTheme
@@ -84,6 +87,18 @@ export const Navbar: React.FC<NavbarProps> = ({
           >
             <Search className="w-4 h-4 text-blue-600" />
           </button>
+
+          {user && (
+            <button
+              type="button"
+              onClick={onOpenNotifications}
+              className="relative rounded-xl border border-slate-200 p-2 text-slate-600 transition-colors hover:bg-slate-100 dark:border-slate-800 dark:text-slate-300 dark:hover:bg-slate-800"
+              title="Faculty notifications"
+              aria-label="Open faculty notifications"
+            >
+              <Bell className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+            </button>
+          )}
 
           {/* Theme Switcher */}
           <button

@@ -11,6 +11,7 @@ import {
   Unit,
   Resource,
   ResourceFile,
+  FacultyNotification,
   User,
   AuditLog,
   AdminStats
@@ -41,6 +42,7 @@ export interface DatabaseSchema {
   units: Unit[];
   resources: Resource[];
   resourceFiles: ResourceFile[];
+  notifications?: FacultyNotification[];
   auditLogs: AuditLog[];
 }
 
@@ -114,6 +116,7 @@ function getInitialSeed(): DatabaseSchema {
     units,
     resources,
     resourceFiles,
+    notifications: [],
     auditLogs
   };
 }
@@ -132,7 +135,8 @@ function isDatabaseSchema(value: unknown): value is DatabaseSchema {
     'resources',
     'resourceFiles',
     'auditLogs',
-  ].every(key => Array.isArray(data[key]));
+  ].every(key => Array.isArray(data[key])) &&
+    (data.notifications === undefined || Array.isArray(data.notifications));
 }
 
 class Database {
@@ -210,6 +214,7 @@ class Database {
         throw new Error('Neon database contains an invalid application state record.');
       }
       state.data = storedData;
+      if (!Array.isArray(state.data.notifications)) state.data.notifications = [];
 
       let finished = false;
       return {
@@ -264,6 +269,8 @@ class Database {
       if (fs.existsSync(DB_FILE)) {
         const raw = fs.readFileSync(DB_FILE, 'utf-8');
         const parsed: DatabaseSchema = JSON.parse(raw);
+        const hadNotifications = Array.isArray(parsed.notifications);
+        if (!hadNotifications) parsed.notifications = [];
         // Ensure legacy fake items are filtered out if any linger
         parsed.subjects = (parsed.subjects || []).filter(s => !s.id.startsWith('subj-'));
         parsed.units = (parsed.units || []).filter(u => !u.id.startsWith('unit-'));
@@ -285,7 +292,7 @@ class Database {
           });
           this.saveDirect(parsed);
         } else {
-          let ownerProfileChanged = false;
+          let ownerProfileChanged = !hadNotifications;
           if (hasVishnu.name !== 'Dr. A. Vishnu Vardhan Reddy') {
             hasVishnu.name = 'Dr. A. Vishnu Vardhan Reddy';
             ownerProfileChanged = true;
@@ -321,8 +328,10 @@ class Database {
 
   public resetToDefault(): void {
     const sharedStudentCredentials = this.data.sharedStudentCredentials;
+    const notifications = this.data.notifications ?? [];
     this.data = getInitialSeed();
     this.data.sharedStudentCredentials = sharedStudentCredentials;
+    this.data.notifications = notifications;
     this.save();
   }
 
@@ -336,6 +345,11 @@ class Database {
   public getUnits(): Unit[] { return this.data.units.sort((a, b) => a.orderIndex - b.orderIndex); }
   public getResources(): Resource[] { return this.data.resources; }
   public getResourceFiles(): ResourceFile[] { return this.data.resourceFiles; }
+  public getNotifications(): FacultyNotification[] {
+    return (this.data.notifications ?? []).slice().sort(
+      (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+    );
+  }
   public getAuditLogs(): AuditLog[] { return this.data.auditLogs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()); }
 
   // User & Auth Management
@@ -512,6 +526,7 @@ class Database {
     const idx = this.data.resources.findIndex(r => r.id === id);
     if (idx === -1) return false;
     const [deleted] = this.data.resources.splice(idx, 1);
+    this.data.resourceFiles = this.data.resourceFiles.filter(file => file.resourceId !== id);
     this.addAuditLog(adminEmail, 'DELETE_RESOURCE', 'resource', id, `Deleted resource: ${deleted.title}`);
     this.save();
     return true;
@@ -529,10 +544,40 @@ class Database {
     return file;
   }
 
+  public addNotification(notification: FacultyNotification, adminEmail: string): FacultyNotification {
+    if (!this.data.notifications) this.data.notifications = [];
+    this.data.notifications.push(notification);
+    this.addAuditLog(adminEmail, 'CREATE_NOTIFICATION', 'notification', notification.id, `Created notification: ${notification.title}`);
+    this.save();
+    return notification;
+  }
+
+  public updateNotification(id: string, title: string, message: string, adminEmail: string): FacultyNotification | null {
+    const notification = (this.data.notifications ?? []).find(item => item.id === id);
+    if (!notification) return null;
+    notification.title = title;
+    notification.message = message;
+    notification.updatedAt = new Date().toISOString();
+    this.addAuditLog(adminEmail, 'UPDATE_NOTIFICATION', 'notification', id, `Updated notification: ${notification.title}`);
+    this.save();
+    return notification;
+  }
+
+  public deleteNotification(id: string, adminEmail: string): boolean {
+    const notifications = this.data.notifications ?? [];
+    const index = notifications.findIndex(item => item.id === id);
+    if (index === -1) return false;
+    const [deleted] = notifications.splice(index, 1);
+    this.data.notifications = notifications;
+    this.addAuditLog(adminEmail, 'DELETE_NOTIFICATION', 'notification', id, `Deleted notification: ${deleted.title}`);
+    this.save();
+    return true;
+  }
+
   public addAuditLog(
     userEmail: string,
     action: string,
-    entityType: 'subject' | 'unit' | 'resource' | 'user' | 'file',
+    entityType: 'subject' | 'unit' | 'resource' | 'notification' | 'user' | 'file',
     entityId: string,
     details: string
   ): void {

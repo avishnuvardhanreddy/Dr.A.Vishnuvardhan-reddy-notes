@@ -113,7 +113,7 @@ CREATE TABLE IF NOT EXISTS public.audit_logs (
   id TEXT PRIMARY KEY,
   user_email TEXT NOT NULL,
   action TEXT NOT NULL,
-  entity_type TEXT NOT NULL CHECK (entity_type IN ('subject', 'unit', 'resource', 'user', 'file')),
+  entity_type TEXT NOT NULL CHECK (entity_type IN ('subject', 'unit', 'resource', 'notification', 'user', 'file')),
   entity_id TEXT NOT NULL,
   details TEXT NOT NULL DEFAULT '',
   timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()

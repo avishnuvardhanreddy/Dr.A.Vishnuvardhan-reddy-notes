@@ -6,6 +6,7 @@
       "name": "react-example",
       "dependencies": {
         "@aws-sdk/client-s3": "^3.1165.0",
+        "@aws-sdk/s3-request-presigner": "3.1165.0",
         "@google/genai": "^2.4.0",
         "@neondatabase/serverless": "^1.2.0",
         "@smithy/types": "^4.20.0",
@@ -63,6 +64,8 @@
     "@aws-sdk/middleware-sdk-s3": ["@aws-sdk/middleware-sdk-s3@3.972.88", "", { "dependencies": { "@aws-sdk/core": "^3.980.2", "@aws-sdk/signature-v4-multi-region": "^3.996.52", "@aws-sdk/types": "^3.975.1", "@smithy/core": "^3.39.0", "@smithy/types": "^4.20.0", "tslib": "^2.6.2" } }, "sha512-Bx5FZr1vhqPSnrJWwJjeO4dYFJ3SNrjaQbw76A1rIKWIxhGXct4dlQLCkgtS52Xh6RNip5ObEIQyEsGAd4fcPw=="],
 
     "@aws-sdk/nested-clients": ["@aws-sdk/nested-clients@3.998.2", "", { "dependencies": { "@aws-sdk/core": "^3.980.2", "@aws-sdk/signature-v4-multi-region": "^3.996.52", "@aws-sdk/types": "^3.975.1", "@smithy/core": "^3.39.0", "@smithy/fetch-http-handler": "^5.8.1", "@smithy/node-http-handler": "^4.14.2", "@smithy/types": "^4.20.0", "tslib": "^2.6.2" } }, "sha512-T1vNOfMdvdjXU4Nq267iTFoxZ2Bj0vEatkp66j8wBtrpDoX1mBWmxy7RL8O93S2oXo+BFEiXH3nWtLMd0svLnA=="],
+
+    "@aws-sdk/s3-request-presigner": ["@aws-sdk/s3-request-presigner@3.1165.0", "", { "dependencies": { "@aws-sdk/core": "^3.980.2", "@aws-sdk/signature-v4-multi-region": "^3.996.52", "@aws-sdk/types": "^3.975.1", "@smithy/core": "^3.39.0", "@smithy/types": "^4.20.0", "tslib": "^2.6.2" } }, "sha512-UxiU48TtdqtpwouOYBCfkZ0T5XEggwnrSvzSAkFt57TmnW2Z5NJsmenjDopKl0jub742g90U1Ih6si8IogAv5Q=="],
 
     "@aws-sdk/signature-v4-multi-region": ["@aws-sdk/signature-v4-multi-region@3.996.52", "", { "dependencies": { "@aws-sdk/types": "^3.975.1", "@smithy/signature-v4": "^5.7.5", "@smithy/types": "^4.20.0", "tslib": "^2.6.2" } }, "sha512-6W6SjGc8OXUhMzNxU1X922ghD+PP1XvzmCk5Scui0jaYsLezycMYR1RaLp5xTIOUrhTXyb4DnAbPr3fBgmdnzg=="],
 

@@ -7,6 +7,7 @@ import {
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import type { Response } from 'express';
 import type { NodeJsClient } from '@smithy/types';
 
@@ -90,6 +91,85 @@ export async function storeUploadedFile(file: UploadedFile): Promise<string> {
   } finally {
     await fs.rm(file.path, { force: true });
   }
+}
+
+export function usesDirectUploads(): boolean {
+  return process.env.VERCEL === '1' || getStorage() !== null;
+}
+
+export async function createPresignedUpload(uploadId: string, contentType: string): Promise<string> {
+  const configuredStorage = getStorage();
+  if (!configuredStorage) {
+    throw new Error('S3-compatible storage is not configured for direct uploads.');
+  }
+
+  return getSignedUrl(configuredStorage.client, new PutObjectCommand({
+    Bucket: configuredStorage.bucket,
+    Key: `uploads/${uploadId}`,
+    ContentType: contentType,
+    Metadata: { 'upload-id': uploadId },
+  }), {
+    expiresIn: 900,
+    signableHeaders: new Set(['content-type']),
+    unhoistableHeaders: new Set(['x-amz-meta-upload-id']),
+  });
+}
+
+export async function inspectPresignedUpload(uploadId: string): Promise<{
+  storagePath: string;
+  sizeBytes: number;
+  mimeType: string;
+  metadataUploadId: string | undefined;
+} | null> {
+  const configuredStorage = getStorage();
+  if (!configuredStorage) {
+    throw new Error('S3-compatible storage is not configured for direct uploads.');
+  }
+
+  const key = `uploads/${uploadId}`;
+  try {
+    const result = await configuredStorage.client.send(new HeadObjectCommand({
+      Bucket: configuredStorage.bucket,
+      Key: key,
+    }));
+    return {
+      storagePath: `s3://${configuredStorage.bucket}/${key}`,
+      sizeBytes: result.ContentLength ?? 0,
+      mimeType: result.ContentType ?? 'application/octet-stream',
+      metadataUploadId: result.Metadata?.['upload-id'],
+    };
+  } catch (error) {
+    const statusCode = (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+    if (statusCode === 404) return null;
+    throw error;
+  }
+}
+
+export async function readPresignedUploadText(uploadId: string, maxBytes: number): Promise<string | null> {
+  const configuredStorage = getStorage();
+  if (!configuredStorage) {
+    throw new Error('S3-compatible storage is not configured for direct uploads.');
+  }
+
+  const result = await configuredStorage.client.send(new GetObjectCommand({
+    Bucket: configuredStorage.bucket,
+    Key: `uploads/${uploadId}`,
+  }));
+  if ((result.ContentLength ?? 0) > maxBytes) return null;
+  if (!result.Body) throw new Error('The uploaded file returned an empty response.');
+  return result.Body.transformToString('utf-8');
+}
+
+export async function deletePresignedUpload(uploadId: string): Promise<void> {
+  const configuredStorage = getStorage();
+  if (!configuredStorage) {
+    throw new Error('S3-compatible storage is not configured for direct uploads.');
+  }
+
+  await configuredStorage.client.send(new DeleteObjectCommand({
+    Bucket: configuredStorage.bucket,
+    Key: `uploads/${uploadId}`,
+  }));
 }
 
 export async function deleteStoredFile(storagePath: string): Promise<void> {

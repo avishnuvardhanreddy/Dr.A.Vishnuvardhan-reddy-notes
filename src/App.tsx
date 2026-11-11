@@ -4,6 +4,7 @@ import { StudentPortal } from './components/StudentPortal.js';
 import { AdminDashboard } from './components/AdminDashboard.js';
 import { AuthModal } from './components/AuthModal.js';
 import { GlobalSearchModal } from './components/GlobalSearchModal.js';
+import { FacultyNotificationsPanel } from './components/FacultyNotificationsPanel.js';
 import { AcademicYear, Semester, Subject, User } from './lib/types.js';
 import { SearchResultItem } from './lib/search-indexer.js';
 import { School, Award, GraduationCap, ShieldCheck, ArrowRight } from 'lucide-react';
@@ -14,6 +15,7 @@ export default function App() {
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [authModalInitialRole, setAuthModalInitialRole] = useState<'student' | 'admin'>('student');
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
 
   // Theme State
   const [isDark, setIsDark] = useState<boolean>(() => {
@@ -288,6 +290,7 @@ export default function App() {
         }}
         onOpenAuth={handleOpenAuth}
         onOpenSearch={() => setIsSearchOpen(true)}
+        onOpenNotifications={() => setIsNotificationsOpen(true)}
         onLogout={handleLogout}
         isDark={isDark}
         onToggleTheme={() => setIsDark(!isDark)}
@@ -375,6 +378,10 @@ export default function App() {
         semesters={semesters}
         subjects={subjects}
         onSelectResult={handleSelectSearchResult}
+      />
+      <FacultyNotificationsPanel
+        isOpen={isNotificationsOpen}
+        onClose={() => setIsNotificationsOpen(false)}
       />
     </div>
   );
